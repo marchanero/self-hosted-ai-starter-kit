@@ -3,13 +3,16 @@ volumes:
   postgres_storage:
   ollama_storage:
   qdrant_storage:
+  open-webui:
 
 networks:
   demo:
+    driver: bridge
 
 x-n8n: &service-n8n
   image: n8nio/n8n:latest
-  networks: ['demo']
+  networks:
+    - demo
   environment:
     - DB_TYPE=postgresdb
     - DB_POSTGRESDB_HOST=postgres
@@ -20,35 +23,55 @@ x-n8n: &service-n8n
     - N8N_ENCRYPTION_KEY
     - N8N_USER_MANAGEMENT_JWT_SECRET
     - OLLAMA_HOST=ollama:11434
+    - N8N_RUNNERS_ENABLED=true
+    - N8N_HOST=0.0.0.0
+    - N8N_PORT=5678
+    - N8N_PROTOCOL=http
+    - N8N_SECURE_COOKIE=false
+    - N8N_EDITOR_BASE_URL=http://100.114.38.122:5678
+    - WEBHOOK_URL=http://100.114.38.122:5678
+  ports:
+    - "5678:5678"
+  labels:
+    - "com.centurylinklabs.watchtower.enable=true"
 
 x-ollama: &service-ollama
   image: ollama/ollama:latest
   container_name: ollama
-  networks: ['demo']
+  networks:
+    - demo
   restart: unless-stopped
-  ports:
-    - 11434:11434
   volumes:
     - ollama_storage:/root/.ollama
+  labels:
+    - "com.centurylinklabs.watchtower.enable=true"
+  environment:
+    - OLLAMA_HOST=0.0.0.0
+  ports:
+    - "11434:11434"
 
 x-init-ollama: &init-ollama
   image: ollama/ollama:latest
-  networks: ['demo']
+  networks:
+    - demo
   container_name: ollama-pull-llama
   volumes:
     - ollama_storage:/root/.ollama
   entrypoint: /bin/sh
   environment:
-    - OLLAMA_HOST=ollama:11434
+    - OLLAMA_HOST=0.0.0.0
   command:
     - "-c"
     - "sleep 3; ollama pull llama3.2"
+  labels:
+    - "com.centurylinklabs.watchtower.enable=true"
 
 services:
   postgres:
     image: postgres:16-alpine
     hostname: postgres
-    networks: ['demo']
+    networks:
+      - demo
     restart: unless-stopped
     environment:
       - POSTGRES_USER
@@ -61,28 +84,14 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
-
-  n8n-import:
-    <<: *service-n8n
-    hostname: n8n-import
-    container_name: n8n-import
-    entrypoint: /bin/sh
-    command:
-      - "-c"
-      - "n8n import:credentials --separate --input=/backup/credentials && n8n import:workflow --separate --input=/backup/workflows"
-    volumes:
-      - ./n8n/backup:/backup
-    depends_on:
-      postgres:
-        condition: service_healthy
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
 
   n8n:
     <<: *service-n8n
     hostname: n8n
     container_name: n8n
     restart: unless-stopped
-    ports:
-      - 5678:5678
     volumes:
       - n8n_storage:/home/node/.n8n
       - ./n8n/backup:/backup
@@ -90,19 +99,22 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      n8n-import:
-        condition: service_completed_successfully
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
 
   qdrant:
     image: qdrant/qdrant
     hostname: qdrant
     container_name: qdrant
-    networks: ['demo']
+    networks:
+      - demo
     restart: unless-stopped
     ports:
       - 6333:6333
     volumes:
       - qdrant_storage:/qdrant/storage
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
 
   ollama-cpu:
     profiles: ["cpu"]
@@ -118,6 +130,8 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
 
   ollama-gpu-amd:
     profiles: ["gpu-amd"]
@@ -126,22 +140,62 @@ services:
     devices:
       - "/dev/kfd"
       - "/dev/dri"
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
 
   ollama-pull-llama-cpu:
     profiles: ["cpu"]
     <<: *init-ollama
     depends_on:
       - ollama-cpu
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
 
   ollama-pull-llama-gpu:
     profiles: ["gpu-nvidia"]
     <<: *init-ollama
     depends_on:
       - ollama-gpu
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
 
   ollama-pull-llama-gpu-amd:
-    profiles: [gpu-amd]
+    profiles: ["gpu-amd"]
     <<: *init-ollama
     image: ollama/ollama:rocm
     depends_on:
      - ollama-gpu-amd
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+
+  webuigpu:
+    image: ghcr.io/open-webui/open-webui:cuda
+    container_name: open-webui
+    networks:
+      - demo
+    restart: always
+    environment:
+      - OLLAMA_BASE_URL=http://100.114.38.122:11434
+    volumes:
+      - open-webui:/app/backend/data
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    depends_on:
+      - ollama-gpu
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+
+  watchtower:
+    image: containrrr/watchtower
+    container_name: watchtower
+    networks:
+      - demo
+    restart: always
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: --schedule "0 0 * * *" --cleanup --restart=always --stop-timeout 30s
